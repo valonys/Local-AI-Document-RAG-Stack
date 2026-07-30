@@ -82,6 +82,58 @@ async def ingest_path(request: Request, body: IngestRequest) -> DocumentSummary:
     )
 
 
+@router.post("/extract")
+async def extract(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Parse a document to per-page markdown + chunks, WITHOUT indexing it.
+
+    Drop-in document parser for callers that just want the extracted content (e.g. CaaS, as a
+    LandingAI-free provider). Returns the shape:
+        { pages: [{ markdown, chunks: [{id, page, type, text, label}] }], page_count, document_name }
+    Page markdown is reconstructed by grouping text chunks on their page_number.
+    """
+    from collections import defaultdict
+
+    suffix = Path(file.filename or "upload").suffix or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        doc = _get_pipeline(request).parse_only(tmp_path, document_name=file.filename)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Extract failed: {exc}") from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    by_page: dict[int, list[Any]] = defaultdict(list)
+    for c in doc.chunks:
+        by_page[c.page_number or 1].append(c)
+
+    pages: list[dict[str, Any]] = []
+    for pageno in sorted(by_page):
+        page_chunks = by_page[pageno]
+        chunks = [
+            {
+                "id": c.chunk_id,
+                "page": pageno,
+                "type": str(c.metadata.get("type", "text")) if isinstance(c.metadata, dict) else "text",
+                "text": c.text,
+                "label": c.section_heading,
+            }
+            for c in page_chunks
+        ]
+        markdown = "\n\n".join(
+            (f"**{c.section_heading}:** " if c.section_heading else "") + c.text for c in page_chunks
+        )
+        pages.append({"markdown": markdown, "chunks": chunks})
+
+    return {
+        "pages": pages,
+        "page_count": max(len(pages), len(doc.pages)),
+        "document_name": doc.document_name,
+    }
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query(request: Request, body: QueryRequest) -> QueryResponse:
     try:

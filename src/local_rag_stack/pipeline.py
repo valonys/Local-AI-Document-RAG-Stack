@@ -177,6 +177,26 @@ class RAGPipeline:
             timeout=self.settings.ollama_timeout,
         )
 
+    def parse_only(
+        self,
+        file_path: Path | str,
+        *,
+        document_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ExtractedDocument:
+        """Parse a document to structured chunks/pages WITHOUT embedding or storing it.
+
+        Powers the /extract endpoint — lets callers (e.g. CaaS) use this stack as a drop-in
+        document parser (LandingAI-free) and get the markdown back without populating the index.
+        """
+        file_path = Path(file_path)
+        extractor = self._select_extractor_for_file(file_path)
+        return extractor.extract(
+            file_path,
+            document_name=document_name,
+            metadata=metadata or {},
+        )
+
     def ingest(
         self,
         file_path: Path | str,
