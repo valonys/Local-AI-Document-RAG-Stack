@@ -171,6 +171,7 @@ class HealthResponse(BaseModel):
     vector_store: str
     graph_store: str | None = None
     models: dict[str, str | None]
+    tenant_id: str | None = None
 
 
 class GraphQueryRequest(BaseModel):

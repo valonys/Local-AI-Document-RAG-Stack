@@ -88,7 +88,19 @@ This sprint delivered a working **local, multi-vector document RAG appliance** w
   - sha256 verification
   - Used to finish the incomplete `vidore/colqwen2-base` shard after repeated HF/Xet timeouts
 
-### 5. Benchmark scripts
+### 5. Tenant-aware API wrapper (`src/local_rag_stack/tenant.py`)
+
+- `Tenant` / `TenantManager` maps `X-API-Key` or `Authorization: Bearer` headers to tenants.
+- Per-tenant storage isolation:
+  - SQLite vector DB: `data/tenants/<tenant-id>/lrs.vec.sqlite`
+  - Graph DB: `data/tenants/<tenant-id>/lrs.graph.sqlite`
+  - Multi-vector JSONL next to the tenant vector DB
+  - Qdrant collection: `<base>-<tenant-id>`
+- Embedders/generators/Ollama clients are reused; only stores are namespaced.
+- All API endpoints (`/health`, `/ingest`, `/query`, `/graph/*`) are tenant-scoped.
+- Auth can be disabled via `LRS_AUTH_REQUIRED=false` for single-tenant local use.
+
+### 6. Benchmark scripts
 
 - `scripts/text_rag_benchmark.py` — text-only end-to-end benchmark
 - `scripts/colqwen_benchmark.py` — visual/ColQwen end-to-end benchmark
@@ -119,6 +131,8 @@ src/local_rag_stack/graph/__init__.py          (new)
 src/local_rag_stack/graph/models.py            (new)
 src/local_rag_stack/graph/extractor.py         (new)
 src/local_rag_stack/graph/store.py             (new)
+src/local_rag_stack/tenant.py                  (new)
+tests/test_tenant.py                           (new)
 scripts/text_rag_benchmark.py                  (new)
 scripts/colqwen_benchmark.py                   (new)
 scripts/graph_benchmark.py                     (new)
@@ -152,9 +166,11 @@ docs/sprint-summary-2026-07-29.md              (this file)
 | CLI | ✅ Ready | `lrs ingest`, `lrs query`, `lrs graph-query`, etc. |
 | Tests | ✅ 18 passed | |
 | Observability | ⚠️ Partial | Add metrics/logging around extraction times, cache hits |
-| Auth / multi-tenancy | ❌ Not implemented | Needed before SaaS deployment |
+| Auth / multi-tenancy | ✅ Ready | API-key → tenant mapping; per-tenant stores |
+| Tenant-aware API wrapper | ✅ Ready | `src/local_rag_stack/tenant.py` + API tests |
 | GPU/MLX optimization | ❌ Not implemented | ColQwen on MLX could be much faster than MPS |
 | Docling/Marker extraction | ⚠️ Optional | `plaintext` engine now sufficient for PDF/XLSX |
+| Docker packaging | ✅ Ready | Dockerfile + docker-compose.yml for standalone HTTP service |
 
 ---
 
@@ -172,26 +188,27 @@ docs/sprint-summary-2026-07-29.md              (this file)
 
 ### Immediate (this week)
 
-1. **Decide integration boundary**:
-   - Option A: Embed `local_rag_stack` as a library inside CaaS / decision-saas.
-   - Option B: Run it as a standalone container/service that CaaS/decision-saas call via HTTP.
-2. **Pick the default stack per workload**:
+1. **Decide integration boundary**: ✅ Standalone HTTP service (Option B) — `docker-compose.yml` provided.
+2. **Auth and multi-tenancy**: ✅ API-key → tenant mapping with per-tenant stores (`src/local_rag_stack/tenant.py`).
+3. **Pick the default stack per workload**:
    - Text-only for high-volume / low-cost perusal.
    - ColQwen for layout-heavy / visual documents where table structure matters.
-3. **Add observability**: log ingest time, embed time, query time, cache hit/miss, model load time.
+4. **Add observability**: log ingest time, embed time, query time, cache hit/miss, model load time.
 
 ### Short term (next 2–4 weeks)
 
-4. **Graph Phase 2 — Evaluator-optimizer loop**:
-   - Add an `Experiment` abstraction around (extraction strategy, chunk size, embed model, prompt).
-   - Run a small labeled eval set and store `Decision` nodes (keep/revert).
+4. **Graph Phase 2 — Evaluator-optimizer loop** (in progress):
+   - Added an `Experiment` abstraction around (extraction strategy, chunk size, embed model, prompt).
+   - New modules: `src/local_rag_stack/evaluation/models.py`, `evaluator.py`, `store.py`.
+   - New CLI commands: `lrs experiment run`, `lrs experiment list`, `lrs experiment show`, `lrs experiment decide`.
+   - Sample eval set: `scripts/sample_eval_set.jsonl`.
+   - SQLite-backed `ExperimentStore` keeps experiments, per-question `EvalResult`s, and keep/revert `Decision`s separate from the graph store.
 5. **Graph Phase 3 — DAG of experiments**:
    - Branch experiments from prior commits.
    - Parallel fan-out of ingestion/retrieval variants.
 6. **MLX ColQwen path**:
    - Evaluate `mlx-vlm` or an MLX-converted ColQwen model for faster Apple-Silicon inference.
-7. **Auth and multi-tenancy**:
-   - Per-tenant vector/graph stores, API keys, document ACLs.
+7. **Auth and multi-tenancy**: ✅ Done — API-key → tenant mapping with per-tenant stores.
 
 ### Longer term
 
@@ -204,21 +221,29 @@ docs/sprint-summary-2026-07-29.md              (this file)
 
 ## How to hand off to CaaS / decision-saas
 
-The package is ready to be handed off as a **library + service skeleton**. Recommended hand-off artifacts:
+The package is ready to be handed off as a **standalone tenant-aware HTTP service**. Recommended hand-off artifacts:
 
 1. This repository (`Local-AI-Document-RAG-Stack`) at the current commit.
+1. `HANDOFF.md` — the production hand-off runbook.
 2. A one-page integration diagram showing:
    - CaaS ingestion service calls `POST /ingest` (or imports `RAGPipeline.ingest()`).
    - Decision-saas query service calls `POST /query` and/or `POST /graph/query`.
 3. Environment template (`.env.example`) with `LRS_*` variables.
-4. Docker packaging (not yet present; add if deploying as a service).
-5. Operational runbook for:
+4. Docker packaging (`Dockerfile`, `docker-compose.yml`, `docker-entrypoint.sh`, `.dockerignore`).
+5. Tenant / auth config:
+   - `.env.example` with `LRS_AUTH_REQUIRED`, `LRS_TENANT_KEYS_JSON`, `LRS_TENANT_KEYS_FILE`.
+   - `src/local_rag_stack/tenant.py` and tests.
+6. Experiment / evaluator scaffolding (Phase 2):
+   - `src/local_rag_stack/evaluation/*`
+   - `lrs experiment run/list/show/decide`
+   - `scripts/sample_eval_set.jsonl`
+7. Operational runbook for:
    - Downloading the ColQwen model once to a shared cache.
    - Monitoring Ollama availability.
    - Tuning `max_graph_chunks` for cost vs. coverage.
+   - Provisioning tenant API keys and mapping them to tenant IDs.
 
 Before production, the receiving team should:
 - Confirm target hardware (Apple Silicon / CUDA / CPU).
-- Add their own auth/tenancy layer.
 - Build a labeled eval set for their specific PDF/XLSX report types.
 - Decide whether to run Ollama co-located or remote.

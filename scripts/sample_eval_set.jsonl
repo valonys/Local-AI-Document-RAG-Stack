@@ -1,0 +1,2 @@
+{"question_id": "q1", "question": "What is the effective date of the Master Services Agreement?", "expected_answer": "1 January 2024", "expected_document_ids": ["msa-2024"], "k": 3, "metadata": {"topic": "contract-metadata"}}
+{"question_id": "q2", "question": "Which party is responsible for data processing under the DPA?", "expected_answer": "Acme Corp", "expected_document_ids": ["dpa-2024"], "k": 3, "metadata": {"topic": "contract-metadata"}}

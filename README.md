@@ -41,7 +41,7 @@ source .venv/bin/activate
 pip install -e ".[ollama,docling,visual,qdrant]"
 
 # Install Apple Silicon extras on macOS
-pip install -e ".[mlx]"
+pip install -e ".[mlx,mac]"
 
 # Pull models into Ollama
 ollama pull qwen3:8b
@@ -72,6 +72,75 @@ Environment variables:
 | `LRS_VECTOR_STORE` | `sqlite` | `sqlite` or `qdrant` (dense store only) |
 | `LRS_SQLITE_VEC_PATH` | `./data/lrs.vec.sqlite` | sqlite-vec file path |
 | `LRS_EXTRACTION_ENGINE` | `docling` | `docling`, `marker`, or `plaintext` |
+| `LRS_FORCE_FULL_PAGE_OCR` | `false` | Force OCR when a PDF has an unreliable native text layer |
+| `LRS_OCR_ENGINE` | `auto` | `auto` prefers macOS Vision (OCRMac) on Apple Silicon; otherwise uses Docling defaults |
+
+## Docker / standalone service deployment
+
+The recommended production boundary is a **standalone HTTP container** that CaaS / decision-saas call over the network.
+
+```bash
+# 1. Copy and edit environment variables
+cp .env.example .env
+
+# 2. Build and start the API + a co-located Ollama service
+docker compose up --build
+
+# 3. Pull the models you need into the Ollama container
+docker exec -it lrs-ollama ollama pull qwen3:8b
+docker exec -it lrs-ollama ollama pull qwen3-embedding:4b
+
+# 4. Smoke test
+curl http://localhost:8000/health
+curl -F file=@sample.pdf http://localhost:8000/ingest
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"query":"Summarise the contract"}' \
+  http://localhost:8000/query
+```
+
+The default image uses the lightweight text-only extras (`ollama,qdrant`) and the `plaintext` extraction engine, so it does not need Docling or Marker inside the container. To enable ColQwen visual retrieval, rebuild with the `visual` extra:
+
+```bash
+docker compose build --build-arg LRS_EXTRAS=ollama,visual,qdrant lrs
+```
+
+To use an Ollama instance running on the Docker host instead of the compose service, override `LRS_OLLAMA_HOST`:
+
+```bash
+docker run -p 8000:8000 \
+  -e LRS_OLLAMA_HOST=http://host.docker.internal:11434 \
+  -v lrs-data:/app/data \
+  local-rag-stack:latest
+```
+
+## Tenant-aware API wrapper
+
+When `LRS_AUTH_REQUIRED=true`, every API request must carry an API key. The key maps to a tenant, and each tenant gets isolated storage:
+
+```bash
+# inline keys
+LRS_AUTH_REQUIRED=true
+LRS_TENANT_KEYS_JSON='{"tenant-a-key":"tenant-a","tenant-b-key":"tenant-b"}'
+
+# or load from file
+LRS_TENANT_KEYS_FILE=./config/tenant_keys.json
+```
+
+Then call the API with the key:
+
+```bash
+curl -H "X-API-Key: tenant-a-key" http://localhost:8000/health
+curl -H "X-API-Key: tenant-a-key" -F file=@report.pdf http://localhost:8000/ingest
+```
+
+Per-tenant isolation is enforced at the storage layer:
+
+- SQLite vector DB: `data/tenants/<tenant-id>/lrs.vec.sqlite`
+- Graph DB: `data/tenants/<tenant-id>/lrs.graph.sqlite`
+- Multi-vector JSONL: stored next to the tenant sqlite DB
+- Qdrant collection: `<base-collection>-<tenant-id>`
+
+Embedders, generators, and the Ollama client are reused across tenants; only the stores are namespaced.
 
 ## Multi-vector / ColQwen mode
 
@@ -90,6 +159,38 @@ pip install --no-deps colpali-engine
 - `POST /query` — ask a question over all ingested documents
 - `GET /documents` — list ingested documents
 - `GET /health` — service health and model status
+
+## Experiments
+
+Run labeled eval sets and record keep/revert decisions with the evaluator-optimizer loop:
+
+```bash
+# Run an eval set (JSONL of EvalQuestion records)
+lrs experiment run --eval-set scripts/sample_eval_set.jsonl --name "text-only baseline"
+
+# Override strategy knobs for the experiment
+lrs experiment run \
+  --eval-set scripts/sample_eval_set.jsonl \
+  --name "plaintext + bge-small" \
+  --strategy-json '{"extraction_engine":"plaintext","text_embed_model":"BAAI/bge-small-en-v1.5"}'
+
+# Review and decide
+lrs experiment list
+lrs experiment show <experiment_id>
+lrs experiment decide <experiment_id> --outcome keep --reason "beats baseline on p@k"
+```
+
+Experiments, per-question results, and decisions are stored in a separate SQLite database (`data/lrs.experiments.sqlite`) so eval metadata does not mix with production vector/graph data.
+
+## Production hand-off
+
+See [`HANDOFF.md`](HANDOFF.md) for the complete production hand-off:
+
+- Tenant auth setup and per-tenant storage isolation.
+- Docker Compose deployment steps.
+- Integration patterns for CaaS / decision-saas.
+- Production checklist and known limitations.
+- Evaluator-optimizer usage with `lrs experiment`.
 
 ## Development
 

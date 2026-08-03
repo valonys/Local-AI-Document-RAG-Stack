@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
+import sys
 from typing import Any
 
 from ..exceptions import ExtractionError
@@ -13,17 +15,38 @@ from .base import DocumentExtractor
 class DoclingExtractor(DocumentExtractor):
     """Extract text and page images using IBM Docling."""
 
-    def __init__(self, *, dpi: int = 150, output_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        dpi: int = 150,
+        output_dir: Path | None = None,
+        force_full_page_ocr: bool = False,
+        ocr_engine: str = "auto",
+    ) -> None:
         super().__init__(dpi=dpi, output_dir=output_dir)
         try:
-            from docling.datamodel.base_models import InputFormat  # noqa: F401
-            from docling.datamodel.document import ConversionResult
-            from docling.document_converter import DocumentConverter
+            from docling.datamodel.base_models import InputFormat
+            from docling.datamodel.pipeline_options import OcrMacOptions, PdfPipelineOptions, RapidOcrOptions
+            from docling.document_converter import DocumentConverter, PdfFormatOption
         except ImportError as exc:
             raise ExtractionError(
                 "Docling is not installed. Install with: pip install 'local-rag-stack[docling]'"
             ) from exc
-        self._converter: Any = DocumentConverter()
+        options = PdfPipelineOptions()
+        options.ocr_options.force_full_page_ocr = force_full_page_ocr
+        selected_engine = ocr_engine.lower()
+        mac_vision_available = sys.platform == "darwin" and importlib.util.find_spec("ocrmac") is not None
+        if selected_engine == "ocrmac" or (selected_engine == "auto" and mac_vision_available):
+            if not mac_vision_available:
+                raise ExtractionError("OCRMac was requested but the macOS Vision bridge is not installed.")
+            options.ocr_options = OcrMacOptions(force_full_page_ocr=force_full_page_ocr)
+        elif selected_engine == "rapidocr":
+            options.ocr_options = RapidOcrOptions(force_full_page_ocr=force_full_page_ocr)
+        elif selected_engine != "auto":
+            raise ExtractionError(f"Unknown OCR engine: {ocr_engine}")
+        self._converter: Any = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)}
+        )
 
     def extract(
         self,
@@ -87,11 +110,15 @@ class DoclingExtractor(DocumentExtractor):
             if prov and len(prov) > 0:
                 bbox_obj = getattr(prov[0], "bbox", None)
                 if bbox_obj:
+                    left = getattr(bbox_obj, "l", getattr(bbox_obj, "x", 0.0))
+                    top = getattr(bbox_obj, "t", getattr(bbox_obj, "y", 0.0))
+                    right = getattr(bbox_obj, "r", left + getattr(bbox_obj, "width", 0.0))
+                    bottom = getattr(bbox_obj, "b", top + getattr(bbox_obj, "height", 0.0))
                     bbox = BoundingBox(
-                        x=getattr(bbox_obj, "l", bbox_obj.x),
-                        y=getattr(bbox_obj, "t", bbox_obj.y),
-                        width=getattr(bbox_obj, "r", bbox_obj.x + bbox_obj.width) - getattr(bbox_obj, "l", bbox_obj.x),
-                        height=getattr(bbox_obj, "b", bbox_obj.y + bbox_obj.height) - getattr(bbox_obj, "t", bbox_obj.y),
+                        x=left,
+                        y=top,
+                        width=right - left,
+                        height=bottom - top,
                     )
             chunks.append(
                 TextChunk(

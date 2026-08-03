@@ -79,7 +79,12 @@ class RAGPipeline:
         engine = self.settings.extraction_engine.lower()
         output_dir = self.settings.data_dir / "pages"
         if engine == "docling":
-            return DoclingExtractor(dpi=self.settings.extraction_dpi, output_dir=output_dir)
+            return DoclingExtractor(
+                dpi=self.settings.extraction_dpi,
+                output_dir=output_dir,
+                force_full_page_ocr=self.settings.force_full_page_ocr,
+                ocr_engine=self.settings.ocr_engine,
+            )
         if engine == "marker":
             return MarkerExtractor(dpi=self.settings.extraction_dpi, output_dir=output_dir)
         if engine == "plaintext":

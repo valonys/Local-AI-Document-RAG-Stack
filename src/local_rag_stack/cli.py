@@ -8,6 +8,9 @@ from pathlib import Path
 import click
 
 from .config import Settings
+from .evaluation.evaluator import Evaluator, exact_or_contains_judge
+from .evaluation.models import DecisionOutcome, EvalQuestion, ExperimentStatus, StrategyConfig
+from .evaluation.store import ExperimentStore
 from .pipeline import RAGPipeline
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -201,6 +204,163 @@ def graph_neighborhood(settings: Settings, entity_id: str, hops: int) -> None:
             )
     finally:
         pipeline.close()
+
+
+def _experiment_db_path(settings: Settings) -> Path:
+    return settings.data_dir / "lrs.experiments.sqlite"
+
+
+def _load_eval_set(path: Path) -> list[EvalQuestion]:
+    questions: list[EvalQuestion] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            questions.append(EvalQuestion.model_validate_json(line))
+    return questions
+
+
+def _settings_with_strategy(settings: Settings, strategy: StrategyConfig) -> Settings:
+    """Return a copy of ``settings`` overridden by the experiment strategy."""
+    overrides = strategy.model_dump(exclude_none=True)
+    # ``Settings`` does not yet expose chunking knobs, so keep them for the
+    # experiment record but do not pass them to the pipeline constructor.
+    overrides.pop("chunk_size", None)
+    overrides.pop("chunk_overlap", None)
+    return Settings(**{**settings.model_dump(), **overrides})
+
+
+@main.group()
+@click.pass_obj
+def experiment(settings: Settings) -> None:
+    """Run and manage evaluator-optimizer experiments."""
+
+
+@experiment.command("run")
+@click.option(
+    "--eval-set",
+    "eval_set_path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option("--name", required=True, help="Human-readable experiment name")
+@click.option("--parent-id", default=None, help="Parent experiment id")
+@click.option("--strategy-json", default=None, help="JSON object of strategy overrides")
+@click.pass_obj
+def experiment_run(
+    settings: Settings,
+    eval_set_path: Path,
+    name: str,
+    parent_id: str | None,
+    strategy_json: str | None,
+) -> None:
+    """Run an eval set and store the result as an experiment."""
+    strategy = StrategyConfig()
+    if strategy_json:
+        strategy = StrategyConfig.model_validate_json(strategy_json)
+
+    eval_set = _load_eval_set(eval_set_path)
+    if not eval_set:
+        click.echo("Eval set is empty.")
+        return
+
+    store = ExperimentStore(_experiment_db_path(settings))
+    experiment_record = store.create_experiment(name, strategy_config=strategy, parent_id=parent_id)
+
+    experiment_settings = _settings_with_strategy(settings, strategy)
+    pipeline = RAGPipeline(experiment_settings)
+    try:
+        store.update_status(experiment_record.id, ExperimentStatus.RUNNING)
+
+        evaluator = Evaluator(pipeline, judge=exact_or_contains_judge)
+        results = evaluator.evaluate(eval_set)
+        for result in results:
+            store.save_result(experiment_record.id, result)
+
+        store.update_status(experiment_record.id, ExperimentStatus.COMPLETED)
+
+        avg_precision = sum(r.precision_at_k for r in results) / len(results)
+        avg_correctness = sum(r.answer_correctness for r in results) / len(results)
+        click.echo(f"Experiment: {experiment_record.id}")
+        click.echo(f"Name: {name}")
+        click.echo(f"Questions: {len(results)}")
+        click.echo(f"Avg precision@K: {avg_precision:.3f}")
+        click.echo(f"Avg correctness: {avg_correctness:.3f}")
+    finally:
+        pipeline.close()
+        store.close()
+
+
+@experiment.command("list")
+@click.pass_obj
+def experiment_list(settings: Settings) -> None:
+    """List all experiments."""
+    store = ExperimentStore(_experiment_db_path(settings))
+    try:
+        experiments = store.list_experiments()
+        if not experiments:
+            click.echo("No experiments found.")
+            return
+        for exp in experiments:
+            click.echo(
+                f"{exp.id}  {exp.name}  {exp.status.value}  {exp.created_at.isoformat()}"
+            )
+    finally:
+        store.close()
+
+
+@experiment.command("show")
+@click.argument("experiment_id")
+@click.pass_obj
+def experiment_show(settings: Settings, experiment_id: str) -> None:
+    """Show one experiment including its eval results and decision."""
+    store = ExperimentStore(_experiment_db_path(settings))
+    try:
+        exp = store.get_experiment(experiment_id)
+        if exp is None:
+            raise click.ClickException(f"Experiment not found: {experiment_id}")
+        click.echo(f"id: {exp.id}")
+        click.echo(f"name: {exp.name}")
+        click.echo(f"status: {exp.status.value}")
+        click.echo(f"parent_id: {exp.parent_id}")
+        click.echo(f"created_at: {exp.created_at.isoformat()}")
+        click.echo(f"strategy: {exp.strategy_config.model_dump_json()}")
+        if exp.decision:
+            click.echo(
+                f"decision: {exp.decision.outcome.value} "
+                f"({exp.decision.decided_at.isoformat()})"
+            )
+            if exp.decision.reason:
+                click.echo(f"decision reason: {exp.decision.reason}")
+        click.echo(f"results: {len(exp.results)}")
+        for result in exp.results:
+            click.echo(f"  - {result.question_id}: p@k={result.precision_at_k:.3f}, "
+                       f"correct={result.answer_correctness:.3f}, "
+                       f"elapsed={result.elapsed_seconds:.3f}s")
+    finally:
+        store.close()
+
+
+@experiment.command("decide")
+@click.argument("experiment_id")
+@click.option("--outcome", type=click.Choice([o.value for o in DecisionOutcome]), required=True)
+@click.option("--reason", default=None, help="Why this decision was made")
+@click.pass_obj
+def experiment_decide(
+    settings: Settings, experiment_id: str, outcome: str, reason: str | None
+) -> None:
+    """Record a keep/revert decision for an experiment."""
+    store = ExperimentStore(_experiment_db_path(settings))
+    try:
+        decision = store.record_decision(
+            experiment_id, DecisionOutcome(outcome), reason=reason
+        )
+        click.echo(
+            f"Recorded {decision.outcome.value} for {decision.experiment_id}"
+        )
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,82 @@
+# Docker Compose stack for the Local AI Document RAG Stack.
+#
+# Usage:
+#   cp .env.example .env
+#   docker compose up --build
+#
+# Then:
+#   curl http://localhost:8000/health
+#   curl -F file=@sample.pdf http://localhost:8000/ingest
+#   curl -X POST -H "Content-Type: application/json" \
+#     -d '{"query":"What is this document about?"}' \
+#     http://localhost:8000/query
+#
+# Notes:
+# - The `ollama` service is included for convenience. On macOS Apple Silicon it
+#   runs on the Linux CPU; for GPU acceleration on Linux/CUDA uncomment the
+#   `deploy.resources.reservations.devices` block below.
+# - The default image uses the text-only extras (ollama,qdrant). To enable
+#   ColQwen visual retrieval, build with:
+#     docker compose build --build-arg LRS_EXTRAS=ollama,visual,qdrant lrs
+# - For multi-tenant deployments, set LRS_AUTH_REQUIRED=true and supply tenant
+#   API keys via .env (LRS_TENANT_KEYS_JSON) or a mounted JSON file
+#   (LRS_TENANT_KEYS_FILE=/app/config/tenant_keys.json). See HANDOFF.md.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: lrs-ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment for NVIDIA GPUs on Linux:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  lrs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LRS_EXTRAS: ollama,qdrant
+    container_name: lrs-api
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      - LRS_OLLAMA_HOST=http://ollama:11434
+      - LRS_DATA_DIR=/app/data
+      - LRS_SQLITE_VEC_PATH=/app/data/lrs.vec.sqlite
+      - LRS_GRAPH_STORE_PATH=/app/data/lrs.graph.sqlite
+      - LRS_EXTRACTION_ENGINE=plaintext
+      - LRS_VECTOR_STORE=sqlite
+      - LRS_API_HOST=0.0.0.0
+      - LRS_API_PORT=8000
+      - HF_HOME=/app/data/hf_cache
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - lrs-data:/app/data
+      # Uncomment to load tenant API keys from a mounted JSON file:
+      # - ./config:/app/config:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  lrs-data:
