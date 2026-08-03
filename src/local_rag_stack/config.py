@@ -58,6 +58,14 @@ class Settings(BaseSettings):
         default=150,
         description="DPI used when rendering pages to images",
     )
+    force_full_page_ocr: bool = Field(
+        default=False,
+        description="Run OCR across whole PDF pages even when a native text layer exists",
+    )
+    ocr_engine: str = Field(
+        default="auto",
+        description="OCR engine: auto, ocrmac, or rapidocr. Auto prefers macOS Vision when available.",
+    )
 
     # Storage
     vector_store: str = Field(
@@ -110,6 +118,28 @@ class Settings(BaseSettings):
 
     # Appliance
     data_dir: Path = Field(default=Path("./data"), description="Local data directory")
+
+    # Tenant / auth
+    auth_required: bool = Field(
+        default=False,
+        description="Require X-API-Key header for all API requests",
+    )
+    default_tenant_id: str = Field(
+        default="default",
+        description="Tenant id used when auth is disabled or no key is supplied",
+    )
+    tenant_keys_json: str | None = Field(
+        default=None,
+        description="JSON object mapping api_key -> tenant_id",
+    )
+    tenant_keys_file: Path | None = Field(
+        default=None,
+        description="Path to JSON file mapping api_key -> tenant_id",
+    )
+    tenants_file: Path | None = Field(
+        default=None,
+        description="Path to JSON file with full Tenant objects",
+    )
 
     def ensure_paths(self) -> None:
         """Create required directories on disk."""

@@ -35,11 +35,13 @@ Central nodes:
 - ✅ Added `lrs graph-query` and `lrs graph-neighborhood` CLI commands.
 - ✅ Added `tests/test_graph.py` with canonicalisation and roundtrip tests.
 
-### Phase 2 — Evaluator-optimizer loop (1–2 weeks)
+### Phase 2 — Evaluator-optimizer loop (1–2 weeks) 🔄 IN PROGRESS
 
-- Add an `Experiment` abstraction that wraps (ingest strategy, query strategy, prompt).
-- Run a small eval set, measure precision@K and answer correctness.
-- Use the result to accept/reject the experiment and update a `Decision` node.
+- ✅ Added `Experiment`, `EvalQuestion`, `EvalResult`, `Decision` models (`src/local_rag_stack/evaluation/models.py`).
+- ✅ Implemented `Evaluator` with precision@K and answer-correctness judges (`src/local_rag_stack/evaluation/evaluator.py`).
+- ✅ Built `ExperimentStore` (SQLite-backed experiments, results, keep/revert decisions) (`src/local_rag_stack/evaluation/store.py`).
+- ✅ Added `lrs experiment run/list/show/decide` CLI commands.
+- 🔄 Next: wire experiments into `RAGPipeline` so a strategy config actually changes chunking/embeddings at ingest time, then run evals over customer PDF/XLSX reports.
 
 ### Phase 3 — DAG of experiments (2–3 weeks)
 

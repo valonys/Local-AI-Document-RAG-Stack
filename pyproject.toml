@@ -55,6 +55,7 @@ mlx = [
     "mlx-vlm>=0.1",
     "mlx-embeddings>=0.1",
 ]
+mac = ["ocrmac>=1.0.1"]
 qdrant = ["qdrant-client>=1.9"]
 dev = [
     "pytest>=8.0",
@@ -64,7 +65,7 @@ dev = [
     "pre-commit>=3.7",
 ]
 all = [
-    "local-rag-stack[ollama,docling,marker,visual,mlx,qdrant,dev]",
+    "local-rag-stack[ollama,docling,marker,visual,mlx,mac,qdrant,dev]",
 ]
 
 [project.scripts]
@@ -85,7 +86,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "C4"]
-ignore = ["E501"]
+ignore = ["E501", "B008"]
 
 [tool.mypy]
 python_version = "3.10"
